@@ -1,7 +1,7 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
-import { Upload, Image as ImageIcon, Loader2, PenTool, Eye, EyeOff } from 'lucide-react';
+import { Upload, Image as ImageIcon, Loader2, PenTool, Eye, EyeOff, CheckCircle2, Circle } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -128,13 +128,66 @@ export default function App() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [result, setResult] = useState<CorrectionResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [loadingStage, setLoadingStage] = useState<'image' | 'text' | null>(null);
+  const [loadingStep, setLoadingStep] = useState(0);
+  const [loadingStartTime, setLoadingStartTime] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [showAnnotations, setShowAnnotations] = useState(true);
   const [showRedLines, setShowRedLines] = useState(true);
-  const [selectedAnnotation, setSelectedAnnotation] = useState<number | null>(null);
+  const [expandedAnnotations, setExpandedAnnotations] = useState<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageContainerRef = useRef<HTMLDivElement>(null);
+
+  const LOADING_STEPS = [
+    { label: '画像を分析中', desc: '作品の構図・人体構造を読み取っています' },
+    { label: '赤ペン修正を生成中', desc: 'プロの視点で修正線を描いています' },
+    { label: '修正線を抽出中', desc: '元画像に重ねる赤ペンレイヤーを作成しています' },
+    { label: 'テキスト注釈を生成中', desc: '修正箇所に対するアドバイスを作成しています' },
+    { label: '完了', desc: '' },
+  ];
+
+  const TIPS = [
+    '💡 人体を描くときは、まず大きなシルエットから捉えましょう',
+    '💡 パースの基本は「消失点」。目線の高さを意識すると安定します',
+    '💡 線画は「入り」と「抜き」を意識すると、生き生きとした線になります',
+    '💡 関節の位置を正確に取ると、ポーズに説得力が出ます',
+    '💡 構図に迷ったら「三分割法」を試してみましょう',
+    '💡 手を描くコツ：まずミトンのような塊として捉えてから指を描く',
+    '💡 布のシワは、力がかかる点（支点）と重力を意識すると自然になります',
+    '💡 影をつけるとき、光源の位置を先に決めると統一感が出ます',
+  ];
+
+  useEffect(() => {
+    if (!loadingStartTime) { setElapsed(0); return; }
+    const timer = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - loadingStartTime) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [loadingStartTime]);
+
+  const currentTip = TIPS[Math.floor(elapsed / 5) % TIPS.length];
+
+  const toggleAnnotation = (index: number) => {
+    setExpandedAnnotations(prev => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  const expandAll = () => {
+    if (result) {
+      setExpandedAnnotations(new Set(result.annotations.map((_, i) => i)));
+    }
+  };
+
+  const collapseAll = () => {
+    setExpandedAnnotations(new Set());
+  };
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -145,7 +198,7 @@ export default function App() {
       reader.readAsDataURL(file);
       setResult(null);
       setError(null);
-      setSelectedAnnotation(null);
+      setExpandedAnnotations(new Set());
     }
   };
 
@@ -161,7 +214,7 @@ export default function App() {
       reader.readAsDataURL(file);
       setResult(null);
       setError(null);
-      setSelectedAnnotation(null);
+      setExpandedAnnotations(new Set());
     }
   };
 
@@ -335,22 +388,28 @@ export default function App() {
     if (!selectedImage || !imagePreview) return;
 
     setIsLoading(true);
+    setLoadingStep(0);
+    setLoadingStartTime(Date.now());
     setError(null);
     setResult(null);
-    setSelectedAnnotation(null);
+    setExpandedAnnotations(new Set());
 
     const base64Data = imagePreview.split(',')[1];
     const mimeType = selectedImage.type;
 
     try {
+      // Step 0: Analyzing
       const originalDims = await getImageDimensions(imagePreview);
 
-      setLoadingStage('image');
+      // Step 1: Generating red-pen corrections
+      setLoadingStep(1);
       let correctedImageUrl: string | null = null;
       let redLinesOverlay: string | null = null;
       try {
         const rawCorrected = await generateImageCorrection(base64Data, mimeType, originalDims);
         if (rawCorrected) {
+          // Step 2: Extracting red lines
+          setLoadingStep(2);
           const correctedDims = await getImageDimensions(rawCorrected);
           if (correctedDims.width !== originalDims.width || correctedDims.height !== originalDims.height) {
             correctedImageUrl = await resizeImageToMatch(rawCorrected, originalDims);
@@ -371,7 +430,8 @@ export default function App() {
         });
       }
 
-      setLoadingStage('text');
+      // Step 3: Generating text annotations
+      setLoadingStep(3);
       let annotationResult: { annotations: TextAnnotation[]; summary: string } | null = null;
       try {
         annotationResult = await generateTextAnnotations(base64Data, mimeType, correctedImageUrl, originalDims);
@@ -384,32 +444,41 @@ export default function App() {
         return;
       }
 
+      // Step 4: Done
+      setLoadingStep(4);
+      const annotations = annotationResult?.annotations || [];
       setResult({
         redLinesOverlay,
-        annotations: annotationResult?.annotations || [],
+        annotations,
         summaryText: annotationResult?.summary || null,
       });
+      setExpandedAnnotations(new Set(annotations.map((_, i) => i)));
     } catch (err) {
       console.error('Error generating feedback:', err);
       setError('エラーが発生しました。APIキーやネットワーク接続を確認してください。');
     } finally {
       setIsLoading(false);
-      setLoadingStage(null);
+      setLoadingStartTime(null);
     }
   };
 
   const getAnnotationPosition = (annotation: TextAnnotation): React.CSSProperties => {
+    const x = Math.max(2, Math.min(98, annotation.x));
+    const y = Math.max(2, Math.min(98, annotation.y));
+
     const style: React.CSSProperties = {
       position: 'absolute',
-      left: `${annotation.x}%`,
-      top: `${annotation.y}%`,
+      top: `${y}%`,
     };
 
-    const anchor = annotation.anchor || 'top-left';
-    if (anchor.includes('right')) {
-      style.transform = anchor.includes('bottom') ? 'translate(-100%, -100%)' : 'translateX(-100%)';
-    } else if (anchor.includes('bottom')) {
-      style.transform = 'translateY(-100%)';
+    // For horizontal placement: if the point is in the right 55% of the image,
+    // anchor from the right edge so the bubble expands leftward.
+    if (x > 55) {
+      style.right = `${100 - x}%`;
+      style.transform = y > 75 ? 'translateY(-100%)' : undefined;
+    } else {
+      style.left = `${x}%`;
+      style.transform = y > 75 ? 'translateY(-100%)' : undefined;
     }
 
     return style;
@@ -483,7 +552,7 @@ export default function App() {
                 {isLoading ? (
                   <>
                     <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                    {loadingStage === 'image' ? '赤ペン生成中...' : 'テキスト生成中...'}
+                    {LOADING_STEPS[loadingStep]?.label || '処理中...'}
                   </>
                 ) : (
                   <>
@@ -508,31 +577,44 @@ export default function App() {
                       </Button>
                     )}
                     {result.annotations.length > 0 && (
-                      <Button
-                        variant={showAnnotations ? 'default' : 'outline'}
-                        size="sm"
-                        className={`h-7 px-2.5 text-xs ${showAnnotations ? 'bg-orange-500 hover:bg-orange-600' : ''}`}
-                        onClick={() => setShowAnnotations(!showAnnotations)}
-                      >
-                        {showAnnotations ? <Eye className="w-3.5 h-3.5 mr-1" /> : <EyeOff className="w-3.5 h-3.5 mr-1" />}
-                        注釈
-                      </Button>
+                      <>
+                        <Button
+                          variant={showAnnotations ? 'default' : 'outline'}
+                          size="sm"
+                          className={`h-7 px-2.5 text-xs ${showAnnotations ? 'bg-orange-500 hover:bg-orange-600' : ''}`}
+                          onClick={() => setShowAnnotations(!showAnnotations)}
+                        >
+                          {showAnnotations ? <Eye className="w-3.5 h-3.5 mr-1" /> : <EyeOff className="w-3.5 h-3.5 mr-1" />}
+                          注釈
+                        </Button>
+                        {showAnnotations && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => expandedAnnotations.size > 0 ? collapseAll() : expandAll()}
+                          >
+                            {expandedAnnotations.size > 0 ? '全て閉じる' : '全て開く'}
+                          </Button>
+                        )}
+                      </>
                     )}
                   </div>
                   <div className="space-y-1.5">
                     {result.annotations.map((ann, i) => {
                       const style = CATEGORY_STYLES[ann.category];
+                      const isExpanded = expandedAnnotations.has(i);
                       return (
                         <button
                           key={i}
                           className={`w-full text-left p-2 rounded-lg border text-xs transition-all ${style.bg} ${style.border} ${style.text} ${
-                            selectedAnnotation === i ? 'ring-2 ring-offset-1 ring-slate-400 shadow-sm' : 'hover:shadow-sm'
+                            isExpanded ? 'ring-2 ring-offset-1 ring-slate-400 shadow-sm' : 'opacity-70 hover:opacity-100'
                           }`}
-                          onClick={() => setSelectedAnnotation(selectedAnnotation === i ? null : i)}
+                          onClick={() => toggleAnnotation(i)}
                         >
                           <span className="font-semibold mr-1.5">{i + 1}.</span>
                           <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-white/60 mr-1.5">{style.label}</span>
-                          {ann.text}
+                          {isExpanded ? ann.text : <span className="text-slate-400">タップで表示</span>}
                         </button>
                       );
                     })}
@@ -552,6 +634,47 @@ export default function App() {
             <CardContent className="flex-1 overflow-hidden flex flex-col">
               {error ? (
                 <div className="p-4 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>
+              ) : isLoading ? (
+                <div className="flex-1 flex flex-col justify-center min-h-[400px] space-y-8 px-4">
+                  {/* Progress steps */}
+                  <div className="space-y-3">
+                    {LOADING_STEPS.slice(0, -1).map((step, i) => {
+                      const isDone = loadingStep > i;
+                      const isActive = loadingStep === i;
+                      return (
+                        <div key={i} className={`flex items-start gap-3 transition-opacity duration-300 ${isDone || isActive ? 'opacity-100' : 'opacity-30'}`}>
+                          <div className="mt-0.5 shrink-0">
+                            {isDone ? (
+                              <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                            ) : isActive ? (
+                              <Loader2 className="w-5 h-5 text-red-500 animate-spin" />
+                            ) : (
+                              <Circle className="w-5 h-5 text-slate-300" />
+                            )}
+                          </div>
+                          <div>
+                            <p className={`text-sm font-medium ${isActive ? 'text-slate-900' : isDone ? 'text-slate-500' : 'text-slate-400'}`}>
+                              {step.label}
+                            </p>
+                            {isActive && (
+                              <p className="text-xs text-slate-500 mt-0.5">{step.desc}</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Elapsed time */}
+                  <div className="text-center text-xs text-slate-400">
+                    経過時間: {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}
+                  </div>
+
+                  {/* Rotating tip */}
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-center transition-all">
+                    <p className="text-xs text-amber-700 leading-relaxed">{currentTip}</p>
+                  </div>
+                </div>
               ) : hasResult ? (
                 <ScrollArea className="flex-1 pr-4 -mr-4">
                   <div className="space-y-6 pb-8">
@@ -574,35 +697,35 @@ export default function App() {
                         )}
                         {showAnnotations && result.annotations.map((ann, i) => {
                           const catStyle = CATEGORY_STYLES[ann.category];
-                          const isSelected = selectedAnnotation === i;
+                          const isExpanded = expandedAnnotations.has(i);
+                          const dotColor = catStyle.border.replace('border-', '').includes('red') ? '#f87171'
+                            : catStyle.border.includes('orange') ? '#fb923c'
+                            : catStyle.border.includes('blue') ? '#60a5fa'
+                            : catStyle.border.includes('purple') ? '#c084fc'
+                            : '#34d399';
                           return (
                             <div
                               key={i}
                               style={getAnnotationPosition(ann)}
-                              className={`absolute z-10 max-w-[200px] transition-all ${isSelected ? 'z-20 scale-110' : ''}`}
+                              className="absolute z-10 transition-all"
                             >
-                              <div
-                                className={`absolute w-3 h-3 rounded-full border-2 border-white shadow-md ${
-                                  ann.anchor?.includes('right') ? 'right-0' : 'left-0'
-                                } ${ann.anchor?.includes('bottom') ? 'bottom-0' : 'top-0'}`}
-                                style={{
-                                  transform: `translate(${ann.anchor?.includes('right') ? '50%' : '-50%'}, ${ann.anchor?.includes('bottom') ? '50%' : '-50%'})`,
-                                  backgroundColor: catStyle.border.replace('border-', '').includes('red') ? '#f87171'
-                                    : catStyle.border.includes('orange') ? '#fb923c'
-                                    : catStyle.border.includes('blue') ? '#60a5fa'
-                                    : catStyle.border.includes('purple') ? '#c084fc'
-                                    : '#34d399',
-                                }}
-                              />
-                              <div
-                                className={`px-2 py-1.5 rounded-md border text-[11px] leading-tight font-medium shadow-lg backdrop-blur-sm cursor-pointer ${catStyle.bg} ${catStyle.border} ${catStyle.text} ${
-                                  isSelected ? 'ring-2 ring-slate-400' : ''
-                                }`}
-                                onClick={() => setSelectedAnnotation(isSelected ? null : i)}
-                              >
-                                <span className="font-bold mr-1">{i + 1}</span>
-                                {ann.text}
-                              </div>
+                              {isExpanded ? (
+                                <div
+                                  className={`min-w-[140px] max-w-[200px] w-max px-2 py-1.5 rounded-md border text-[11px] leading-tight font-medium shadow-lg backdrop-blur-sm cursor-pointer ${catStyle.bg} ${catStyle.border} ${catStyle.text}`}
+                                  onClick={() => toggleAnnotation(i)}
+                                >
+                                  <span className="font-bold mr-1">{i + 1}</span>
+                                  {ann.text}
+                                </div>
+                              ) : (
+                                <div
+                                  className="w-6 h-6 rounded-full border-2 border-white shadow-lg cursor-pointer flex items-center justify-center text-white text-[10px] font-bold hover:scale-125 transition-transform"
+                                  style={{ backgroundColor: dotColor, transform: 'translate(-50%, -50%)' }}
+                                  onClick={() => toggleAnnotation(i)}
+                                >
+                                  {i + 1}
+                                </div>
+                              )}
                             </div>
                           );
                         })}
