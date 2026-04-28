@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Upload, Image as ImageIcon, Loader2, PenTool, Eye, EyeOff, CheckCircle2, Circle } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { compressBase64ForApi } from './utils/compressImage';
 
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -261,10 +262,10 @@ export default function App() {
     if (correctedDataUrl) {
       const correctedBase64 = correctedDataUrl.split(',')[1];
       const correctedMime = correctedDataUrl.split(';')[0].split(':')[1];
-      images.push({ base64Data: correctedBase64, mimeType: correctedMime });
+      images.push(await compressBase64ForApi(correctedBase64, correctedMime));
     }
 
-    images.push({ base64Data: originalBase64, mimeType: originalMimeType });
+    images.push(await compressBase64ForApi(originalBase64, originalMimeType));
 
     const prompt = correctedDataUrl
       ? `あなたはプロの漫画家・イラストレーターの講師です。
